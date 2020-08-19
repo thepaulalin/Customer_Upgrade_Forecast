@@ -1,0 +1,408 @@
+---
+title: "Customer Upgrade Timeline"
+author: "Paula Lin"
+date: "8/10/2020"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Model A: Customer Upgrade Likelihood
+
+## Summary
+
+This is an analysis of customer upgrade likelihood, more specifically if Liferay Portal (6.x or below) customers will upgrade to Liferay DXP (7+). Two types of predictive models are used to predict if a customer (Project) will upgrade, a linear regression model and a logistic regression model. Linear regression is useful to show how different predictors contribute to a response. For example, what factors contribute to a customer Upgrading? How much do they contribute to the potential upgrade?Logistic regression is commonly used for modeling binary response data. Logistic regression models the probability of a success (e.g. Upgrade), not the expectation of the response variable, given the predicting variables.
+
+This analysis will be used to help anticipate our customer's upgrade needs so our Customer support teams can reach out with upgrade resources to customers who are probably already considering an upgrade.
+
+## Data and Predictive Variables
+
+* A Project is identified as *Upgraded* if they have created Portal (6.x or below) tickets and DXP (7+) tickets.
+
+Note, a customer may have purchased a DXP offering, but not yet created any tickets on DXP yet. For the purposes of this analysis, they will be considered as not-yet upgraded.
+
+One additional factor to take into account is Project Status.
+
+If a Project is Closed and has only Portal tickets, we can conclude that they are a non-Upgrade Project. However, if a Project is Active and has only Portal tickets, they can still potentially *Upgrade*. In fact, our goal is to have every customer *Upgraded,* since Liferay Portal 6.2 EE is now in the Limited Support Phase. Therefore, any Active Project with only Portal tickets is the target in which we seek to predict if they will upgrade or not. 
+
+Consequently, our predictive models can only be built using Closed Projects (Upgraded or not-upgrade) and Active Upgraded Projects. Due to this unbalanced dataset, it is assumed that the model is skewed towards predicting *Upgrade* more than in reality, since we are unable to conclusively prove that an Active Project will NEVER upgrade, at this time. Note, future iterations may be able to separate Active Projects into those that can potentially upgrade and those that will NEVER upgrade.
+
+The data is filtered to exclude any Projects closed prior to January 1, 2017. Liferay 7.0 was first released June 15, 2016.
+
+Let's read in the data we will use to build and assess our predictive models.
+```{r}
+rm(list=ls(all=TRUE))
+
+# Set your working directory to where you have stored the data files
+setwd("C:/Users/liferay/SQL practices/LRSUPPORT-36395 Estimate Cust Upgrade Timeline")
+
+## Read the data in R
+upgrade = read.csv("dataset.csv", header=TRUE, stringsAsFactors=TRUE)
+
+# Set a seed for reproducibility
+set.seed(1)
+
+# Clean data
+# 
+# Set NA to 0 
+upgrade[is.na(upgrade)] = 0
+
+# Remove the irrelevant columns
+clean_data = upgrade[-c(1)] #remove accountEntryId
+
+# Convert the numerical categorical variables to predictors
+clean_data$LPP = as.factor(clean_data$LPP)
+clean_data$Max_Version = as.factor(clean_data$Max_Version)
+clean_data$prev_Upgrade = as.factor(clean_data$prev_Upgrade)
+clean_data$Zendesk = as.factor(clean_data$Zendesk)
+
+summary(clean_data)
+dim(clean_data)
+```
+There are 968 Projects that are in our starting dataset; 482 non-upgraded and 486 Upgraded.
+We have 13 predictive variables that we will use to build our predictive models:
+
+* $Feedback$: # feedback responses the Project has provided
+* $Industry$: Project's Account Industry, pulled from Salesforce, grouped into 6 main groups (Manufacturing, Agriculture, Services, Education/Research, Government, and Null & Other)
+* $LPP$: Binary indicator if the Project has any LPPs (1 = has LPP, 0 = no LPP)
+* $Max\_Version$: Highest version Project was on prior to Project's upgrade, if no Upgrade, the Project's current version (5.2, 6, 6.1, 6.2)
+* $prev\_Upgrade$: Binary indicator if the Project has upgraded before, including minor version upgrades (1 = has prior upgrade, 0 = no prior upgrade)
+* $Sub\_yrs$: Project's total years as a Subscription Service Subscriber, from Salesforce
+* $Support.Region$: Project's Support REgion (Hungary, US, Spain, Brazil, India, China, Other)
+* $Time\_Max\_V$: Number of years Project was on Max Version prior to Upgrade, if no Upgrade, how long on current version
+* $Zendesk$: Binary indicator if the Project has Zendesk tickets (1 = has Zendesk tickets, 0 = no Zendesk tickets)
+* $Tix\_Max\_V$: Number of tickets Project has created, on Max Version prior to Upgrade, if no Upgrade, tickets on current version
+* $Tix$: Total Number of tickets Project has created
+* $crTime\_Max\_V$: Average crTime (days from Ticket Create Date to Ticket Closed/Solved Date) for tickets on Max Version prior to Upgrade, if no Upgrade, tickets on current version
+* $CSAT$: Average Customer Satisfaction response provided by Project (1 if satisfied, 0 if not satisfied)
+
+Note: $Upgrade_time$ will be used in Model B, when predicting the time it takes to Upgrade.
+
+## Exploratory Data Analysis
+
+Let's assess the correlation between the quantitative predictors.
+```{r}
+# Assess correlation between quant predictors
+Q = cor(clean_data[,-c(2,3,4,5,7,10,11)])
+library(corrplot)
+library(RColorBrewer)
+corrplot(Q, method="number")
+```
+Feedback and Total Tickets (Tix) are strongly correlated (p = 0.73), which is reasonable. The more tickets a Project creates, the more opportunity for feedback.
+Tickets on Max Version and Total Tickets semi-strongly correlated (p = 0.64), which is reasonable. 
+
+Split data into train dataset (for training the model) and test dataset (to assess the model performance).
+```{r}
+# 80% Train 20% Test split
+sample_size = floor(0.8*nrow(clean_data))
+picked = sample(seq_len(nrow(clean_data)), size=sample_size)
+train_up = clean_data[picked,]
+test_up = clean_data[-picked,]
+```
+
+## Model A: Logistic Regression
+```{r}
+# Build Model A to predict Upgrade using all predictors except Upgrade_time
+modelA = glm(Upgraded ~ .-Upgrade_time,  family=binomial, data=train_up)
+summary(modelA)
+
+## Save Predictions to compare with observed data
+test.predA = predict(modelA, test_up, type='response')
+```
+
+* *Equation of Model 2*:
+
+$Upgraded = e^{\sum_{n=1}^{n} estimated\_coeff * predictor}/(1+e^{\sum_{n=1}^{n} estimated\_coeff * predictor})$
+
+where is the number of predictors.
+
+*Some predictors of note:*
+
+* $prev\_Upgrade1$ (-6.857e-01) is stat sig at alpha = 0.1 level. Therefore, if a customer has a prior upgrade, the log odds of Upgrade decreases by -0.851217. Or the odds of upgrade decreases by 57.31%, since (e^-6.857e-01)=0.5037 (which means Projects that have a previous upgrade are 49.62% less likely to upgrade).
+* $Sub\_yrs$ (2.968e-01) is stat sig at alpha = 0.001 level. Therefore, for a one unit increase in total years as subscriber, the log odds of Upgrade increases by 2.968e-01. Or the odds of upgrade increases by 34.55%, since (e^2.968e-01)=1.3455 (which is 0.3455 more).
+* $Time\_Max\_V$ (-7.798e-01) is stat sig at alpha = 0.001 level. Therefore, for a one unit increase in tickets on max version, the log odds of Upgrade decreases by -7.798e-01. Or the odds of upgrade decreases by 54,15%, since (e^-7.798e-01)=0.4585 (which is 0.5415 less).
+* $Zendesk1$ (4.826) is stat sig at alpha = 0.001 level. Therefore, if a customer has zendesk tickets, the log odds of Upgrade increases by 4.826. Or the odds of upgrade is 123 times as likely, since (e^4.826)=124.71 (which is 123.71). Note this may not be as meaningful because currently active Projects can only create tickets on Zendesk. 
+* $CSAT$ (1.445) is stat sig at alpha = 0.01 level. Therefore, for a one unit increase in Customer Satisfaction, the log odds of Upgrade increases by 1.445. Or the odds of upgrade is 3.24 times as likely, since (e^1.445)=4.2419 (which is 3.2419 more).
+
+## Compare Model Performance
+
+Let's round the prediction values to get binary predictions from which we can compute accuracy (classification rate).
+
+```{r message=FALSE}
+#install.packages("pROC")
+library(pROC)
+roc_objA = roc(test_up$Upgraded, test.predA)
+
+# Assess optimal threshold
+threshA = coords(roc_objA, "best", "threshold",  transpose = TRUE)[1]
+threshA
+yhat_threshA = as.integer(test.predA > threshA, transpose = TRUE)
+
+conf_matrixA = as.matrix(table(yhat_threshA, test_up$Upgraded))
+conf_matrixA
+
+
+accuracyA = sum(yhat_threshA== test_up$Upgraded)/nrow(test_up)
+accuracyA
+
+
+# Mean Squared Prediction Error (MSPE)
+mspeA = mean((test.predA-test_up$Upgraded)^2) 
+mspeA
+
+mspeA_r = mean((yhat_threshA-test_up$Upgraded)^2) 
+mspeA_r
+
+# Precision Measure (PM)
+pmA = sum((test.predA-test_up$Upgraded)^2)/sum((test_up$Upgraded-mean(test_up$Upgraded))^2) 
+pmA
+
+# R-squared
+TSS = sum((test_up$Upgraded-mean(test_up$Upgraded))^2)
+RSS_A = sum((test_up$Upgraded-test.predA)^2)
+R_squared_A = 1 - (RSS_A/TSS)
+R_squared_A
+
+RSS_A_r = sum((test_up$Upgraded-yhat_threshA)^2)
+R_squared_A_r = 1 - (RSS_A_r/TSS)
+R_squared_A_r 
+```
+For the optimal threshold = 0.5209771, ModelA has accuracy 92.27%. The confusion matrix shows 85 Projects are correctly predicted as non-upgraded, 94 Projects are correctly predicted as upgrade. The mean squared prediction error for rounded estimates = 0.07731959 (the lower the error, the better). The precision measure = 0.2711099. The R-squared value for rounded predictions is 68.95%.
+
+## Test on 6-month subset
+
+We will assess the Model A be comparing it's predictions for a subset of projects that either Upgraded or Closed (non-upgrade) in the last 6 months (115 Projects). This subset was withheld from the original dataset that was used to train and test Model A.
+```{r}
+# use the model to forecast the result for approved/non-upgraded projects
+six_mnth = read.csv("dataset (6 mnth).csv", header=TRUE, stringsAsFactors=TRUE)
+
+# Clean data
+# 
+# Set NA to 0
+six_mnth[is.na(six_mnth)] = 0
+
+# Remove the irrelevant columns
+six_mnth_data = six_mnth[-c(1)] #remove accountEntryId and Upgrade_time
+# Convert the numerical categorical variables to predictors
+six_mnth_data$LPP = as.factor(six_mnth_data$LPP)
+six_mnth_data$Max_Version = as.factor(six_mnth_data$Max_Version)
+six_mnth_data$prev_Upgrade = as.factor(six_mnth_data$prev_Upgrade)
+six_mnth_data$Zendesk = as.factor(six_mnth_data$Zendesk)
+
+summary(six_mnth_data)
+dim(six_mnth_data)
+
+## Use Model A to predict for 6 month subset
+six_mnth.predA = predict(modelA, six_mnth_data, type='response')
+
+# round based on optimal threshold identified using test_data
+six_mnth_yhat_threshA = as.integer(six_mnth.predA > threshA)
+
+six_mnth_predictions = cbind.data.frame(six_mnth[1], six_mnth.predA, six_mnth_yhat_threshA, six_mnth$Upgraded)
+
+# Prediction if upgrade output into a csv file
+write.csv(six_mnth_predictions,'six_month_predictions.csv')
+
+# Assess Model A performance
+sum(six_mnth_yhat_threshA != six_mnth$Upgraded)
+
+#confusion matrix of 6-month actuals vs. model A predictions
+as.matrix(table(six_mnth_yhat_threshA, six_mnth$Upgraded))
+# accuracy= (42+49)/(42+3+21+49)=91/115=79.13% accuracy
+```
+Model A has 79.13% accuracy for the 6 month subset. It correctly predicts 42 Projects that did not Upgrade and correctly predicts 49 Projects that did upgrade. It incorrectly predicts 24 Projects. There are 3 False Negatives (Projects that are predicted to not upgrade that actually did upgrade) and 21 False Positives (Projects predicted to Upgrade, that did not upgrade).
+
+As expected, there are more False Positives as the model overpredicts upgrades.
+
+## Use Models to Predict for New Projects
+
+Use models to predict if not-yet Upgraded Projects (Active Projects with only Portal Tickets) will upgrade or not. There are 371 Active Projects that will be fed into the model.
+```{r}
+# use the model to forecast the result for approved/non-upgraded projects
+new = read.csv("new.csv", header=TRUE, stringsAsFactors=TRUE)
+
+# Clean data
+# 
+# Set NA to 0
+new[is.na(new)] = 0
+
+# Remove the irrelevant columns
+new_data = new[-c(1)] #remove accountEntryId
+# Convert the numerical categorical variables to predictors
+new_data$LPP = as.factor(new_data$LPP)
+new_data$Max_Version = as.factor(new_data$Max_Version)
+new_data$prev_Upgrade = as.factor(new_data$prev_Upgrade)
+new_data$Zendesk = as.factor(new_data$Zendesk)
+
+summary(new_data)
+dim(new_data)
+
+## Use Model A to predict for new data
+new.predA = predict(modelA, new_data, type='response')
+
+# round based on optimal threshold identified using test_data
+new_yhat_threshA = as.integer(new.predA > threshA)
+
+new_predictionsA = cbind.data.frame(new[1], new.predA, new_yhat_threshA)
+# Prediction if upgrade output into a csv file
+write.csv(new_predictionsA,'new_predictions_A.csv')
+
+```
+
+
+# Model B: Customer Upgrade Timeline
+
+## Next steps: 
+Next, we will build a second model to predict WHEN the Upgrade will occur. Instead of building the model with response "Upgraded," we will build the model using "Upgrade_time."
+
+*Upgrade_time* is the difference between 1st Portal ticket (start on 6 date) create date and 1st DXP ticket (start on 7 date) create date, note Portal ticket is Max Liferay Version prior to upgrade.
+
+Model B will be built using only Upgraded Projects, since Projects that never Upgraded don't have a start on 7 date.
+
+## Model B: Linear Regression
+```{r}
+# Filter for upgraded projects
+clean_dataB = clean_data[which(clean_data$Upgraded==1),]
+summary(clean_dataB)
+
+# 80% Train 20% Test split
+sample_sizeB = floor(0.8*nrow(clean_dataB))
+pickedB = sample(seq_len(nrow(clean_dataB)), size=sample_sizeB)
+train_upB = clean_dataB[pickedB,]
+test_upB = clean_dataB[-pickedB,]
+
+# Build Model A to predict Upgrade using all predictors except Upgrade_time
+modelB = lm(Upgrade_time ~ .-Upgraded,  data=train_upB)
+summary(modelB)
+
+## Save Predictions to compare with observed data
+test.predB = predict(modelB, test_upB)
+```
+Model B seems to fit the dataset of Upgraded Projects well with Multiple R-squared:  0.7794,	Adjusted R-squared:  0.7648.
+
+Some significant variables in Model B are:
+
+* $Feedback$: -0.012014, for each additional feedback provided, the upgrade time decreases by -0.012014 years, holding all other predictors in the model constant.
+* $prev\_Upgrade1$: 1.782731, if a customer has a previous upgrade, the upgrade time increases by 1.782731 years, holding all other predictors in the model constant.
+* $Sub\_yrs$: 0.193481, for each additional year as a subscriber, the upgrade time increases by 0.193481 years, holding all other predictors in the model constant.
+* $Time\_Max\_V$: 0.707220, for each additional year on the Project's Max Version before Upgrade, the upgrade time increases by 0.707220 years, holding all other predictors in the model constant.
+* $Tix.Max\_V$: -0.008496, for each additional ticket on Max Version, the upgrade time decreases by -0.008496 years, holding all other predictors in the model constant.
+* $Tix$: 0.007902, for each additional year as a subscriber, the upgrade time increases by 0.007902, holding all other predictors in the model constant.
+
+## Model B Assessment on test_dataset
+```{r message=FALSE}
+# Mean Squared Prediction Error (MSPE)
+mspeB = mean((test.predB-test_upB$Upgrade_time)^2) 
+mspeB
+
+# Precision Measure (PM)
+pmB = sum((test.predB-test_upB$Upgrade_time)^2)/sum((test_upB$Upgrade_time-mean(test_upB$Upgrade_time))^2) 
+pmB
+
+# R-squared
+TSS_B = sum((test_upB$Upgrade_time-mean(test_upB$Upgrade_time))^2)
+RSS_B = sum((test_upB$Upgrade_time-test.predB)^2)
+R_squared_B = 1 - (RSS_B/TSS_B)
+R_squared_B
+```
+Model B performs pretty well on the test subset. It has Mean Squared Prediction Error = 1.094938, Precision Measure = 0.2110325, and R-squared = 0.7889675.
+
+
+## Model B Assessment on 6 month subset
+Let's see how Model B performs on the 6 month subset of Projects that Upgraded in the last 6 months (since Model B upgrade time only applies to Upgraded Projects).
+
+```{r}
+# Filter for upgraded projects
+six_mnth_dataB = six_mnth_data[which(six_mnth_data$Upgraded==1),]
+summary(six_mnth_dataB)
+## Use Model B to predict for 6 month subset
+six_mnth.predB = predict(modelB, six_mnth_dataB)
+
+six_mnth_predictionsB = cbind.data.frame(six_mnth_dataB[1], six_mnth.predB, six_mnth_dataB$Upgrade_time)
+head(six_mnth_predictionsB)
+# Prediction if upgrade output into a csv file
+write.csv(six_mnth_predictionsB,'six_month_predictionsB.csv')
+
+# Assess Model B performance for 6 month subset
+
+# Mean Squared Prediction Error (MSPE)
+mspeB = mean((six_mnth.predB-six_mnth_dataB$Upgrade_time)^2) 
+mspeB
+
+# Precision Measure (PM)
+pmB = sum((six_mnth.predB-six_mnth_dataB$Upgrade_time)^2)/sum((six_mnth_dataB$Upgrade_time-mean(six_mnth_dataB$Upgrade_time))^2) 
+pmB
+
+# R-squared
+TSS_B = sum((six_mnth_dataB$Upgrade_time-mean(six_mnth_dataB$Upgrade_time))^2)
+RSS_B = sum((six_mnth_dataB$Upgrade_time-six_mnth.predB)^2)
+R_squared_B = 1 - (RSS_B/TSS_B)
+R_squared_B
+```
+Model B predictions for the six month subset has Mean Squared Prediction Error = 1.729391, precision measure = 0.8159225, but the R-squared is very low = 0.1840775. This is a sign that Model B (built without most recent projects) is less accurate for more recent Projects.
+
+## Model B Predictions for new Projects predicted to Upgrade
+
+Next, let's run Model B predictions for our new subset of Project that have been predicted to upgrade.
+```{r}
+# New Projects predicted to Upgrade
+new_B = new_predictionsA[which(new_predictionsA$new_yhat_threshA==1),]
+
+new_data_B = merge(x = new, y = new_B, by = "ï..account.Entry.Id")#, all.y = TRUE)
+
+# Remove the irrelevant columns
+new_dataB = new_data_B[-c(1)] #remove accountEntryId
+# Convert the numerical categorical variables to predictors
+new_dataB$LPP = as.factor(new_dataB$LPP)
+new_dataB$Max_Version = as.factor(new_dataB$Max_Version)
+new_dataB$prev_Upgrade = as.factor(new_dataB$prev_Upgrade)
+new_dataB$Zendesk = as.factor(new_dataB$Zendesk)
+
+summary(new_dataB)
+dim(new_dataB)
+
+## Use Model B to predict for new data
+new.predB = predict(modelB, new_dataB)
+
+
+new_predictionsB = cbind.data.frame(new_data_B[1], new.predB)
+
+# Prediction if upgrade output into a csv file
+write.csv(new_predictionsB,'new_predictions_B.csv')
+```
+After loading Model B into Tableau and adding the forecasted Upgrade Time (new.predB) to each Project's Start on 6 Date (Create Date of 1st Portal Ticket on Max Version), I observed some predicted Upgrade Projects have a forecasted Upgrade date that has already passed 
+
+* 150 Projects have a predicted Upgrade date in the past
+* 49 has a predicted Upgrade date in the future). 
+
+Note: The earliest passed predicted Upgrade is still in 2020, February 17, 2020, which could still be helpful information.
+
+Since, we earlier noticed that Model B built without the most recent 6-months worth of data has a low R-squared value, it's possible that Model B performs worse for Active Projects as times goes on. This is because as an Active Project continues to not Upgrade and not Close, it is not represented in the dataset used to build the model (since it is still active). The majority of Upgraded Projects in the model building dataset will have shorter Upgrade Time, so Model B will tend to under-estimate the Upgrade Time.
+
+Testing the Model B predictions after adding the 6 month subset does not improve predictions for new Projects. Because the 6 month subset has no Upgrades that have taken over 6.5 years, the predictions actually decrease.
+
+Testing alternative Start Dates, such as Last Portal Offering Date, gave a worse model without strong improvements. Additionally, Offering Dates do not always reflect when customers actually start on a version/start generating tickets.
+
+# Conclusion:
+In conclusion, Model A predictions for active Projects with only Portal tickets are output into a csv file. The equation is hard-coded into the Tableau Report.
+
+currently, the model likely predicts more upgrades than in reality because no Active non-upgraded Projects are included in the training/testing dataset, ideally we should have examples of active accounts that did not upgrade/will not upgrade.
+
+Model B predictions for when a Project will upgrade are also output into a csv file and hard-coded into the Tableau Report.
+Model B is built using only Upgrade projects. Unfortunately, the majority of the predicted Upgrade dates are in the past. This is due to the fact that the model building dataset fails to accurately capture the new dataset of Projects. The model building dataset fails to include many Projects that have Upgraded after a long time, since they have either Closed without Upgrading or are still Active in the new dataset.
+
+Considering how to deal with Projects with predicted Upgrade Dates in the past:
+
+* We can consider the customers with Upgrade timeline in the past as Non-upgrade. Since the model predicts they should've upgraded, but they did not perhaps it is sufficient to conclude they are non-upgrade? This could help generate more examples of Active Portal customers who are Non-upgrade customers. However, this is non-ideal because our goal is to have every customer upgrade. If we settle for having these customers are non-upgrade customers and they eventually do upgrade, we will be unprepared.
+* We can try to add more time to their predicted Upgrade date through alternative methods. This method is harder because the problem is limited data on which to forecast.
+* Or we can treat all Projects with past Upgrade Date as high priority/assume they are Upgrading now.
+
+## Next Steps
+Moving forward, Patricia Draut will be reaching out to CAS and RSM team members to get their suggestions about valuable predictors.
+
+Additionally, as time moves on, more long-standing Projects will either Upgrade or Close, which will be helpful for improving our Models. However, we will need to generate the new Model at a time when there are still sufficient non-Upgraded Projects, so that the model will be useful.
